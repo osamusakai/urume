@@ -1,0 +1,383 @@
+---
+title: "estimateMSY"
+author: "chikako watanabe"
+date: "2020/11/5"
+output: html_document
+---
+
+# 1. 設定
+```{r setup, include=FALSE}
+library(knitr)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("C:/RWD/ASSESS/urume/for_share"))
+options(digits=15)
+
+source("uVPA.r")
+source("ufuture.r")
+
+```
+
+# 2.将来予測計算
+## 2-1. VPAの結果とSR解析結果のとりだし
+```{r read data}
+#vpa
+res_vpa_urume <- get(load( "./obj/res_urume_vpa.rda"))
+
+#res_SR
+fitSR.reslist = readRDS("./obj/fitSR_reslist.obj")
+```
+
+## 2-2 MSY推定等
+fitSR.reslistから目的とする再生産関係の当てはめ結果を指定し、MSY、0.6MSY,0.1MSYを計算する
+```{r calc_future}   
+#目的のSRfitを取り出す
+res_SR_MSY = fitSR.reslist$RI_L2$AR1inner
+
+#prefuture関数を使って準備 ----
+   ## 引数
+   ### res_vpa    = res_vpa_urume 
+   ### res_SR_MSY = res_SR_MSY_RI 
+   ### fyear      = 50 #将来予測する年数
+prepare = prefuture(res_vpa_urume, res_SR_MSY, fyear= 50)
+
+#ufuture関数で将来予測 ----
+  ##引数
+   ### prepare prefuture関数で準備されるオブジェクトのリスト
+   ### rep :試行回数
+   ### fbeta :Fcurにかける係数
+
+#MSY推定 ----
+#試行回数(テストのため100としているが、必要な回数を指定する)
+   rep = 100
+   
+#MSY推定のための最適化関数を定義
+   opt_MSY = function(fbeta){
+        tempres = ufuture(prepare, rep = rep, fbeta = fbeta)
+        catch_obj = mean(tempres$catchl[,"2070"])
+        return(catch_obj)}
+   
+#最適化
+   resoptim = optimize(opt_MSY,  lower = 0, upper = 1.2, maximum = TRUE)
+   
+#最適化結果をつかって再計算
+   res_uMSY = ufuture(prepare, rep = rep, fbeta = resoptim[[1]])
+
+      
+#結果の取り出し
+   #MSYとか
+   uMSY        = resoptim[[2]] ## MSY
+   uSSBMSY     = mean(res_uMSY$ssbl[,"2070"]) ## SSBMSY
+   uFmulti_MSY = resoptim[[1]]## FMSYのFcurrentに対する比
+   uFMSY       = uFmulti_MSY*prepare$input$Fcur ## FMSY
+   uRatio      = mean(res_uMSY$cratiol[,"2070"])## MSY時の漁獲割合
+   uYPRSPR_MSY = calc_uYPRSPR(uFmulti_MSY, prepare$input$Fcur, prepare$input$M, prepare$input$waa_future) 
+   
+   #SPR等の取り出しfmulti, fcur, mspr, wspr
+   u_pSPR_MSY  = uYPRSPR_MSY[4] ## MSY時のSPR
+
+   summaryMSY = data.frame(MSY = uMSY, 
+                       SSBMSY = uSSBMSY, 
+                       FMSY = mean(uFMSY), 
+                       FMSYperFcur=uFmulti_MSY,
+                       Cratio = uRatio,
+                       pSPR = u_pSPR_MSY)
+   
+#0.6MSY推定 ----
+#最適化関数を定義
+   opt_0.6MSY = function(fbeta){
+        tempres = ufuture(prepare, rep = rep, fbeta = fbeta)
+        catch_obj = (log(mean(tempres$catchl[,"2070"]))-log(uMSY*0.6))^2
+        return(catch_obj)}
+#計算
+   resoptim = optimize(opt_0.6MSY, lower = uFMSY, upper = 2, maximum = FALSE)
+#最適化結果をつかって再計算
+   res_0.6MSY = ufuture(prepare, rep = rep, fbeta = resoptim[[1]])
+
+#結果の取り出し
+   u0.6MSY = mean(res_0.6MSY$catchl[,"2070"]) ## 0.6MSY
+   u0.6SSBMSY = mean(res_0.6MSY$ssbl[,"2070"])## 0.6SSBMSY
+   u0.6Fmulti_MSY = resoptim[[1]]## 0.6FMSYのFcurrentに対する比
+   u0.6FMSY       = u0.6Fmulti_MSY*prepare$input$Fcur## 0.6FMSY
+   u0.6Ratio      = mean(res_0.6MSY$cratiol[,"2070"])## MSY時の漁獲割合
+   u0.6YPRSPR_MSY = calc_uYPRSPR(u0.6Fmulti_MSY, prepare$input$Fcur, prepare$input$M, prepare$input$waa_future) #fmulti, fcur, mspr, wspr
+   
+   ## SPR等の取り出し
+   u_0.6pSPR_MSY  = u0.6YPRSPR_MSY[4] ## MSY時のSPR
+   
+   #summary
+   summary0.6 = c(u0.6MSY, u0.6SSBMSY,mean(u0.6FMSY),u0.6Fmulti_MSY,u0.6Ratio,u_0.6pSPR_MSY)
+   
+#0.1MSY推定 ----
+#最適化関数を定義
+   opt_0.1MSY = function(fbeta){
+        tempres = ufuture(prepare, rep = rep, fbeta = fbeta)
+        catch_obj = (log(mean(tempres$catchl[,"2070"]))-log(uMSY*0.1))^2
+        return(catch_obj)}
+#最適化
+   resoptim = optimize(opt_0.1MSY,  lower = uFMSY, upper = 2, maximum = FALSE)
+#最適化結果をつかって再計算
+   u0.1FMSY = as.numeric(resoptim[1])
+   res_0.1MSY = ufuture(prepare, rep = rep, fbeta = u0.1FMSY)
+
+
+#結果の取り出し
+   u0.1MSY = mean(res_0.1MSY$catchl[,"2070"])## 0.1MSY
+   u0.1SSBMSY = mean(res_0.1MSY$ssbl[,"2070"]) ## 0.SSBMSY
+   u0.1Fmulti_MSY = resoptim[[1]] ## 0.1FMSYのFcurrentに対する比
+   u0.1FMSY       = u0.1Fmulti_MSY*prepare$input$Fcur ## 0.1FMSY
+   u0.1Ratio      = mean(res_0.1MSY$cratiol[,"2070"])## MSY時の漁獲割合
+   u0.1YPRSPR_MSY = calc_uYPRSPR(u0.1Fmulti_MSY, prepare$input$Fcur, prepare$input$M, prepare$input$waa_future) #fmulti, fcur, mspr, wspr 
+   
+   ## SPR等の取り出し
+   u_0.1pSPR_MSY  = u0.1YPRSPR_MSY[4]## MSY時のSPR 
+   
+   #summary
+   summary0.1 = c(u0.1MSY, u0.1SSBMSY,mean(u0.1FMSY),u0.1Fmulti_MSY,u0.1Ratio,u_0.1pSPR_MSY)
+   
+   
+   #MSY, 0.6MSY,0.1MSYのsummaryを結合
+   summary_uMSY =  rbind(summaryMSY, summary0.6, summary0.1)
+   rownames(summary_uMSY) = c("MSY", "0.6MSY","0.1MSY")
+
+## 保存。ファイル名は上で選択した再生産関係がわかるように指定する   
+   write.csv(summary_uMSY, "./obj/summaryMSY_RIL2in.csv")
+   saveRDS(res_uMSY, "./obj/res_uMSY_RIL2in.obj")
+
+```      
+
+
+#3.SPRYPRの作図
+ref.F()を使うが、
+res_vpa＿urumeから計算するとうまく行かないので、基本の数値を与えて計算させる
+純正res_vpaじゃないからかな..(´・ω・｀)
+
+```{r SRPYPR}
+
+Fcur = res_vpa_urume$Fc.at.age
+M = res_vpa_urume$input$dat$M[,1]
+waa_future = prepare$input$waa_future
+
+uSPRYPR = ref.F(
+   Fcurrent = Fcur, 
+   waa = waa_future,
+   waa.catch = waa_future, 
+   M=c(0.625,0.625,0.625,0.625), 
+   maa = c(0,0,1,1), 
+   max.age = 3, min.age = 0,
+  Pope =TRUE)
+
+uSPRYPR$summary
+
+```
+
+
+#4.Fcurrentの作図
+```{r fcurrent, fig.height=3, fig.width= 6, echo = FALSE}
+#urume仕様
+startyr = 2020
+plot_Fcurrent(vpares     = res_vpa_urume,
+              Fcurrent   = res_vpa_urume$Fc.at.age,#Fcurrent
+              year.range = rev(startyr-1:6)) 
+
+```
+
+
+# 5.yield curve の作図
+```{r yieldcurve, fig.height = 3, fig.width = 4, out.width = '50%', echo = FALSE}
+#目的のSRfitを取り出す
+res_SR_MSY = fitSR.reslist$HS_L2$AR1inner
+
+#prefuture関数を使って準備 ----
+   ## 引数
+   ### res_vpa    = res_vpa_urume 
+   ### res_SR_MSY = res_SR_MSY_RI 
+   ### fyear      = 50 #将来予測する年数
+prepare = prefuture(res_vpa_urume, res_SR_MSY, fyear= 50)
+
+#Fについてトレース ----
+## F=0から任意のFまでトレース
+trace_list = list()
+range = sort(c(seq(0, 19.9,by = 0.1))) #HSL2AR0
+#range = sort(c(seq(0, 20, by = 1), seq(6.1,6.9,by = 0.1)))
+
+locate = ncol(prepare$naaf) #MSYを見る年
+
+for(l in seq_along(range)){
+   res_u = ufuture(prepare, rep = 200, fbeta = range[l]/10)
+  #res_futureの結果をまとめる 
+ 
+   res_mul = cbind(res_u$Fmulti,
+                   mean(res_u$ssbl[,locate]),
+                   mean(res_u$catchl[,locate]),
+                   mean(res_u$wcaa1[,locate]),
+                   mean(res_u$wcaa2[,locate]),
+                   mean(res_u$wcaa3[,locate]),
+                   mean(res_u$wcaa4[,locate]))
+   colnames(res_mul) = c("Fmulti","SSB", "catch_total","Age0","Age1", "Age2", "Age3")
+   trace_list[[l+1]] = res_mul
+}
+res_trace = data.frame(do.call(rbind, trace_list))
+
+#結果を作図
+ymax <- max(res_trace$catch_total, na.rm = T)/1000
+xmax <- max(res_trace$SSB, na.rm = T)/1000
+
+data_trace = res_trace %>% dplyr::select(Fmulti, SSB, Age0,Age1,Age2,Age3) %>%
+                           tidyr::gather(key = age, value = catch, -Fmulti, -SSB) 
+data_trace$SSB = data_trace$SSB/1000
+data_trace$catch = data_trace$catch/1000
+
+xlim.scale = 0.9
+ylim.scale = 1.2
+age.label.ratio = 0.7
+
+
+age.label.position <- data_trace$SSB[which.min((data_trace$SSB - xmax * xlim.scale * age.label.ratio)^2)]
+age.label <- data_trace %>% dplyr::filter(round(age.label.position, 1) == round(SSB, 1)) %>% 
+                            dplyr::mutate(cumcatch = cumsum(catch) - catch/2.5)
+age.label$age = c("0歳前期","0歳後期","1歳前期","1歳後期")
+#ggplot(data_trace,aes(x = SSB, y = catch, color = age)) + geom_line()
+
+g1 <- ggplot(data_trace) + geom_area(aes(x = SSB, y = catch, fill = age), 
+        col = "black", alpha = 0.5, lwd = 1 * 0.3528) + 
+        scale_fill_brewer() + 
+        theme(legend.position = "none") + 
+        theme(panel.grid = element_blank(), axis.text = element_text(color = "black")) + 
+        coord_cartesian(xlim = c(0, xmax * xlim.scale), 
+                        ylim = c(0,ymax * ylim.scale), expand = 0)+
+        geom_text(data = age.label, #ここで年齢の凡例がかける
+                  mapping = aes(y = cumcatch, x = SSB, label = age)) + 
+        xlab(str_c("平均親魚量 (千トン)")) + 
+        ylab(str_c("平均漁獲量 (千トン)")) 
+g1+theme_SH()
+
+```
+
+
+
+# 6.kobe_plot
+urume用、拡張性を無視して書き換える
+```{r kobe_plot, fig.height = 3, fig.width = 6, out.width = '50%', echo = FALSE}
+#作図のためのデータの作成
+#必要なデータ
+#SSB/SSBtarget
+#U/Utarget
+#F/Ftarget
+
+### HCR描画に必要なエリア
+# 以下のデータをとってきて
+##  limit.RP <- derive_RP_value(refs_base, Blimit)
+##  low.RP <- derive_RP_value(refs_base, Blow)
+##  ban.RP <- derive_RP_value(refs_base, Bban)
+#以下のデータを作る
+##  low.ratio <- low.RP$SSB/target.RP$SSB
+##  limit.ratio <- limit.RP$SSB/target.RP$SSB
+##  ban.ratio <- ban.RP$SSB/target.RP$SSB
+### HCRの描画に必要なエリアここまで
+
+#MSYのときの以下の3数値必要
+  Btarget0 = uSSBMSY  #SSBMSYを入力する
+  Utarget  = uRatio # UMSYを入力する
+  target_SPR = u_pSPR_MSY
+  aveFMSY     = mean(uFMSY)  # FMSYの全年齢平均
+  
+#urume仕様のuget.SPRを使用して過去のSPR等を得たのち、Bratio、Fratio,Uratioを得る
+  SPR.history <- uget.SPR(res_vpa_urume,
+                         target.SPR= target_SPR,
+                         max.age = 4,Fmax = 10)$ysdata %>%
+                 mutate(Bratio = as.numeric(res_vpa_urume$baa[3,1:(ncol(res_vpa_urume$baa)-1)]/Btarget0)) %>%
+                 mutate(Fratio = as.numeric(colMeans(res_vpa_urume$faa[,1:(ncol(res_vpa_urume$faa)-1)])/aveFMSY))
+  
+  #漁獲割合の計算
+  u_past = colMeans(rbind(colSums(res_vpa_urume$wcaa[c(1,3),])/colSums(res_vpa_urume$baa[c(1,3),]),
+                          colSums(res_vpa_urume$wcaa[c(2,4),])/colSums(res_vpa_urume$baa[c(2,4),])))
+  u_past = rev(rev(u_past)[-1])
+  
+  #MSYのときのUをとってきて、u_pastを割ってUratioを算出する必要あり
+  SPR.history$upast = u_past
+  SPR.history$Uratio = u_past/Utarget
+
+  kobe.ratio <- tibble(year=1999:2019,
+                       Fratio=SPR.history$"Fratio",
+                       Bratio=SPR.history$"Bratio",
+                       Uratio= SPR.history$"Uratio")
+   
+  
+#-- Kobe plotのための設定
+  label_name_kobe <- c("SSBMSY","SSB0.6MSY","SSB0.1MSY")
+
+  
+  #データ
+  UBdata = kobe.ratio
+  
+  #プロットにつける年ラベル
+  labeling.year = c(1999,2019,2005,2010)
+  UBdata <- UBdata %>% mutate(year.label = ifelse(year %in% labeling.year, year, ""), year_group = 1)
+  
+  #軸の範囲を決める
+  max.B <- max(c(UBdata$Bratio, xscale=1.2), na.rm = T)
+  max.U <- max(c(UBdata$Uratio, yscale=1.2), na.rm = T)
+  max.F <- max(c(UBdata$Fratio, yscale=1.2), na.rm = T)
+  
+  #背景の色
+  red.color <- "indianred1"
+  yellow.color <- "khaki1"
+  green.color <- "olivedrab2"
+  
+  #背景
+  g4 <- ggplot(data = UBdata) + theme(legend.position = "none") + 
+    geom_polygon(data = tibble(x = c(-1, 1, 1, -1), y = c(-1,-1, 1, 1)), aes(x = x, y = y), fill = yellow.color) + 
+    geom_polygon(data = tibble(x = c(1, 20, 20, 1), y = c(-1,-1, 1, 1)), aes(x = x, y = y), fill = green.color) + 
+    geom_polygon(data = tibble(x = c(1, 20, 20, 1), y = c(1,1, 20, 20)), aes(x = x, y = y), fill = yellow.color) + 
+    geom_polygon(data = tibble(x = c(-1, 1, 1, -1), y = c(1,1, 20, 20)), aes(x = x, y = y), fill = red.color) + 
+    geom_polygon(data = tibble(x = c(-1, 1, 1, -1), y = c(-1, -1, 1, 1)), aes(x = x, y = y), fill = yellow.color)
+
+  #HCRを重ね書きするとき
+  #if (write.vline) {
+  #  g4 <- g4 + geom_vline(xintercept = c(1, limit.ratio, ban.ratio),color = refs.color, lty = "41", lwd = 0.7) + 
+  #             ggrepel::geom_label_repel(data = tibble(x = c(1,limit.ratio, ban.ratio), y = max.U * 0.85, label = RP.label), 
+  #                                      aes(x = x, y = y, label = label), 
+  #                                      direction = "x", 
+  #                                      nudge_y = max.U * 0.9, size = 11 * 0.282)
+  # }
+    #if (!is.null(beta)) {
+  #  multi2currF = function(x) {
+  #    if (x > limit.ratio) {
+  #      multi2currF = beta
+  #    }
+  #    else if (x < ban.ratio) {
+  #      multi2currF = 0
+  #    }
+  #    else {
+  #      multi2currF = beta * (x - ban.ratio)/(limit.ratio - ban.ratio)
+  #    }
+  #    return(multi2currF)
+  #  }
+    
+  #  h = Vectorize(multi2currF)
+  #  x.pos <- max.B * HCR.label.position[1]
+  #  y.pos <- multi2currF(1.05) * HCR.label.position[2]
+  #g4 <- g4 + stat_function(fun = h, lwd = 1.5, color = "black", n = 5000) + 
+  #           annotate("text", x = x.pos, y = y.pos, label = str_c("漁獲管理規則\n(β=", beta,")"))
+  #}
+  
+#Uratio  
+  g4_U <- g4 + geom_path(mapping = aes(x = Bratio, y = Uratio , group = year_group))+ 
+             geom_point(mapping = aes(x = Bratio, y = Uratio, group = year_group), shape = 21, fill = "white") + 
+             coord_cartesian(xlim = c(0, max.B * 1.1), ylim = c(0, max.U * 1.15), expand = 0) + 
+             ylab("漁獲割合の比 (U/Umsy)") + 
+             xlab("親魚量の比 (SB/SBmsy)") + 
+             ggrepel::geom_text_repel(aes(x = Bratio, y = Uratio, label = year.label), size = 4, box.padding = 0.5, segment.color = "gray") + theme_SH()
+
+#Fratio
+  g4_F <- g4 + geom_path(mapping = aes(x = Bratio, y = Fratio , group = year_group))+ 
+             geom_point(mapping = aes(x = Bratio, y = Fratio, group = year_group), shape = 21, fill = "white") + 
+             coord_cartesian(xlim = c(0, max.B * 1.1), ylim = c(0, max.U * 1.15), expand = 0) + 
+             ylab("漁獲圧の比 (F/Fmsy)") + 
+             xlab("親魚量の比 (SB/SBmsy)") + 
+             ggrepel::geom_text_repel(aes(x = Bratio, y = Fratio, label = year.label), size = 4, box.padding = 0.5, segment.color = "gray")+theme_SH()
+  
+gridExtra::grid.arrange(g4_U,g4_F,ncol=2)
+```
+

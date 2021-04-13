@@ -1,0 +1,294 @@
+---
+title: "ウルメイワシの再生産関係の検討"
+author: "chikako watanabe"
+date: "2020/12/22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("C:/RWD/ASSESS/urume/for_share"))
+
+getwd()
+```
+
+
+
+```{r read data, echo = FALSE, warnings = FALSE}
+#データを呼び出し、SRdataの形にする
+res_vpa_MSY <- get(load("./obj/res_urume_vpa.rda"))
+
+R.dat   = as.matrix(res_vpa_MSY$naa)[1,] #加入量
+SSB.dat = as.matrix(res_vpa_MSY$ssb)[3,] #親魚量
+years   = as.numeric(colnames(res_vpa_MSY$ssb)) #年
+ny      = length(years) #VPAの年数
+
+#データ整形
+data_SR <- frasyr::get.SRdata(R.dat = R.dat, SSB.dat = SSB.dat, years = as.numeric(colnames(res_vpa_MSY$naa)), return.df=TRUE)
+
+data_SR <- data_SR %>% dplyr::filter(R>0)
+
+SR_weight <- rep(0,nrow(data_SR))
+
+year_for_srfit <- -c(1:2) #再生産関係の解析に使うデータには直近2年（2019，2020年）を含めない
+if(year_for_srfit<0) year_for_srfit <- rev(data_SR$year)[year_for_srfit]
+if(year_for_srfit>0) SR_weight[data_SR$year %in% year_for_srfit] <- 1
+if(year_for_srfit==0) SR_weight[] <- 1
+
+```
+
+
+# 再生産関係のあてはめ
+## 1.網羅的なパラメータ推定
+
+```{r SR exhaustive,echo = FALSE, warning = FALSE, message=FALSE}
+ # select_type <- ifelse(res_SR_MSY$input$AR==0,"non",
+  #                      ifelse(res_SR_MSY$input$out.AR==TRUE,"outer","inner"))
+  
+  SRmodel.list <- expand.grid(SR.rel = c("HS","BH","RI"), L.type = c("L1", "L2")) %>%
+    as_tibble()
+ 
+  SRmodel.list$pars <- purrr::map2(SRmodel.list$SR.rel, SRmodel.list$L.type,
+                                   function(x,y){
+                                     res1 <- unlist(fit.SR(data_SR, 
+                                                           SR = x, method = y, 
+                                                           AR = 0, hessian = FALSE, 
+                                                           out.AR=TRUE, w=SR_weight)[c("pars","AICc")])
+                                     tmp <- fit.SR(data_SR, SR = x, method = y, 
+                                                  AR = 1, hessian = FALSE, out.AR=TRUE, w=SR_weight)
+                                     res2 <- unlist(tmp[c("pars","AICc")])
+                                     res2 <- c(res2,"deltaAIC(AIC_AR-AIC_noAR)"=tmp$AIC.ar[2]-tmp$AIC.ar[1])
+                                     res3 <- unlist(fit.SR(data_SR, SR = x, method = y, w=SR_weight,
+                                                           AR = 1, hessian = FALSE, out.AR=FALSE)[c("pars","AICc")])
+                                     bind_rows(res1,res2,res3,.id="id")
+                                   })
+  
+  SRmodel.list <- SRmodel.list %>%
+    unnest() %>%
+    left_join(tibble(id=as.character(1:3),AR.type=c("non","outer","inner"))) %>%
+    arrange(AICc,AR.type) %>%
+    select(-id)
+  
+  ## print results of SR fit
+SRmodel.list
+
+#保存したいときは以下を実行(パス・ファイル名は適宜）
+saveRDS(SRmodel.list, file = "./obj/SRmodel-list.obj")
+write.csv(SRmodel.list, file="./obj/SRmodel-list.csv")
+```
+
+
+## 2 再生産モデルの比較
+### 2-1 パラメータ推定
+SR×method×（自己相関あり、外、内）でフィットさせ、結果をリストに保存
+```{r SR_exhaustive_estimate, echo = FALSE, warning = FALSE}
+ 
+  SRmodel.list <- expand.grid(SR.rel = c("HS","BH","RI"), L.type = c("L1", "L2")) %>%  as_tibble()
+  
+  
+  fitSR.reslist <- purrr::map2(SRmodel.list$SR.rel, SRmodel.list$L.type,
+                                   function(x,y){
+                                     res1 <- fit.SR(data_SR, SR = x, method = y, 
+                                                           AR = 0, hessian = TRUE, 
+                                                           out.AR=TRUE,
+                                                           w=SR_weight)
+                                     res2 <- fit.SR(data_SR, SR = x, method = y, 
+                                                           AR = 1, hessian = TRUE,
+                                                           out.AR=TRUE, 
+                                                           w=SR_weight)
+                                     res3 <- fit.SR(data_SR, SR = x, method = y,
+                                                           w=SR_weight,
+                                                           AR = 1, hessian = TRUE,
+                                                           out.AR=FALSE)
+                                     restemp = list(res1, res2, res3)
+                                     names(restemp) = c("AR0", "AR1outer", "AR1inner")
+                                     return(restemp)                                     
+                                   })
+
+  
+length(fitSR.reslist)
+resname = NULL
+for(i in 1:length(fitSR.reslist)){
+     resname = append(resname, paste(fitSR.reslist[[i]][[1]]$input$SR,
+                fitSR.reslist[[i]][[1]]$input$method,sep="_"))
+  }
+
+
+names(fitSR.reslist) = resname
+
+#結果を保存したいときは以下を実行
+saveRDS(fitSR.reslist, "./obj/fitSR_reslist.obj")
+
+```
+
+
+### 2-2 steepnessなど
+<!--
+まだ「プラスグループなし」に対応していない（20210406）
+```{r calc_steepnessHS, warning = FALSE}
+hlist = list()
+counter = 1
+
+ny = ncol(res_vpa_MSY$input$dat$waa)
+waa_cur = rowMeans(res_vpa_MSY$input$dat$waa[,(ny-9):ny])
+
+for(i in 1:6){
+  for(j in 1:3){
+    hlist[[counter]] = calc_steepness(
+               SR       = fitSR.reslist[[i]][[j]]$input$SR,
+               rec_pars = fitSR.reslist[[i]][[j]]$pars,
+               M        = 0.625,
+               waa      = waa_cur,
+               maa      = c(0,0,1,0),
+               plus_group=FALSE) %>%
+      mutate(model = names(fitSR.reslist)[i]) %>%
+      mutate(AR    = names(fitSR.reslist[[i]])[j])
+      counter = counter +1
+    }
+}
+
+hlist = do.call(rbind, hlist)
+#write.csv(hlist, "./obj/hlist_original.csv")
+```
+-->
+
+### 2-3 グラフ
+2-1で作ったfirSR.reslistから結果を取り出して作図
+
+```{r make_plotsSR, fig.height=3, fig.width=10, out.width = '50%'}
+
+ggSR = list()
+SRplot_label_year <- c(1990,2000,2010,2017)
+for(i in 1:6){
+  gs = list()
+  for(j in 1:3){
+   gs[[j]] =SRplot_gg(fitSR.reslist[[i]][[j]], xscale=1000,xlabel="千トン",
+                       yscale=1000,ylabel="千尾",
+                       labeling.year=SRplot_label_year,
+                       ## 90%信頼区間を表示していることに注意！
+                      refs=NULL,plot_CI=TRUE,CI=0.9,
+                      add.info=TRUE) + theme_SH()
+   
+  }
+  ggSR[[i]] = gs
+}
+
+names(ggSR) = resname
+gridExtra::grid.arrange(ggSR$HS_L2[[1]],ggSR$HS_L2[[2]],ggSR$HS_L2[[3]],ncol = 3) #HS_L2について、自己相関なし、自己相関2段階、同時
+gridExtra::grid.arrange(ggSR$BH_L2[[1]],ggSR$BH_L2[[2]],ggSR$BH_L2[[3]],ncol = 3) #BH_L2について、自己相関なし、自己相関2段階、同時
+gridExtra::grid.arrange(ggSR$RI_L2[[1]],ggSR$RI_L2[[2]],ggSR$RI_L2[[3]],ncol = 3) #RI_L2について、自己相関なし、自己相関2段階、同時
+
+```
+
+
+
+## 3.再生産関係のチェック
+
+## 3-1 HS_L2自己相関内側 の例
+```{r select_HS_L2ARin, warning = FALSE, fig.width = 4, fig.height = 4, out.width = '50%'}
+#再生産関係を選択
+res_SR_MSY = fitSR.reslist$HS_L2$AR1inner
+ggSR$HS_L2[[3]]
+
+```
+
+
+####  a) 推定値の収束の有無等のチェック
+```{r checkSRfit_HS_L2ARin, warning = FALSE}
+checkfit = check.SRfit(res_SR_MSY, output = FALSE)
+# ①収束しているか (convergence)
+# ②ヘッセ行列 (Hessian) の対角成分が正定値 (positive definite) になっているか  
+# ③境界条件（HSの場合SSBの両端、それ以外の場合直線関係や極端に強い密度依存関係）に達しているか  
+# ④対数尤度が大域解 (global optimum) に 達しているか  
+# ⑤大域的最適解をもつパラメータがひとつに決まるかどうか（④で大域解が出られている場合のみ）  
+
+checkfit$pars
+res_SR_MSY$pars
+checkfit$par_summary
+checkfit$percent_bias_summary #点推定値から何％バイアスしても尤度が変わらないか
+
+```
+
+```{r plotSRfit_HSL2_ARin,fig.width = 12, fig.height = 4, warning = FALSE, out.width = '50%'}
+check.SRdist(res_SR_MSY)
+autocor.plot(res_SR_MSY, use.resid = 1)
+autocor.plot(res_SR_MSY, use.resid = 2)
+
+```
+
+##### hessian行列、相関行列（パラメータ間の相関係数の行列）
+```{r cov_check_HSL2_ARin}
+#return (list(hessian=hessian,cov=cov,cor=cor))
+(hessian = res_SR_MSY$opt$hessian)
+(cov = solve(hessian))
+(cor = stats::cov2cor(cov))
+
+```
+
+##### steepnessのブートストラップ
+```{r boot_steepness_HSL2_ARin ,fig.width =4, fig.height=4, out.width='50%'}
+boot_steepness <- function(res_SR, M, waa, maa, n=100, plus_group=TRUE){
+
+    is.model.average <- class(res_SR)!="fit.SRregime" && class(res_SR)!="fit.SR"
+    
+    if(is.model.average){ # model average case (calculate recursively)
+      res_steepness <- purrr::map_dfr(res_SR, boot_steepness, n=n, M=M, waa=waa, maa=maa, plus_group=plus_group, .id="average_id")
+    }else{
+      res_boot <- boot.SR(res_SR, n=n)
+      if(class(res_boot[[1]])=="fit.SRregime"){ # regime shift
+          res_steepness <- purrr::map_dfr(res_boot, function(x){
+              par.matrix <- res_SR$regime_pars[c("a","b")]
+              tmplist <- purrr::map_dfr(seq_len(nrow(par.matrix)),
+                                    function(i){
+                                        calc_steepness(SR=res_SR$input$SR,rec_pars=par.matrix[i,],M=M,waa=waa,maa=maa,
+                                                       plus_group=plus_group)
+                                    },.id="regime_id")
+          })
+      }
+      if(class(res_boot[[1]])=="fit.SR"){ # normal
+          res_steepness <- purrr::map_dfr(res_boot[1:n], function(x){
+              calc_steepness(SR=res_SR$input$SR,rec_pars=x$pars,M=M,waa=waa,maa=maa,plus_group=plus_group)
+          })
+      }}    
+
+    res_steepness
+}
+
+res = boot_steepness(res_SR_MSY,
+               M=0.625, 
+               waa = rowMeans(res_vpa$input$dat$waa[,(ny-9):ny]),
+               maa = c(0,0,1,0),
+               n=100, plus_group=FALSE)
+hist(res$h)
+
+```
+
+
+#### b) 精度のチェック
+##### パラメトリックブートストラップ
+*回数100にしてます
+```{r boot1_HSL2_ARin, fig.width=8,fig.height=8, warning = FALSE, out.width = '30%'}
+boot.res1 = boot.SR(res_SR_MSY,n=100,method="p")
+bootSR.plot(boot.res1)
+```
+
+##### ノンパラメトリックブートストラップ
+*回数100にしてます
+```{r boot2_HSL2_ARin,  fig.width=6,fig.height=6, warning = FALSE, out.width = '30%'}
+boot.res2 = boot.SR(res_SR_MSY,n=100,method="n")
+bootSR.plot(boot.res2)
+```
+
+##### ジャックナイフ
+```{r jack1_HSL2_ARin,  fig.width=10,fig.height=10, warning = FALSE, out.width = '30%'}
+jack1 = jackknife.SR(res_SR_MSY,is.plot=TRUE)
+```
+
+
+##### プロファイル尤度
+
+```{r proflik_HSL2_ARin,  fig.width=6,fig.height=4, warning = FALSE, out.width = '30%'}
+rof1 = prof.likSR(res_SR_MSY)
+```
+
+
